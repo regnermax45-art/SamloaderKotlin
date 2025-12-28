@@ -196,6 +196,82 @@ object FusClient {
         }
     }
 
+    /**
+     * Download a file from Samsung's server with real-time firmware porting.
+     * Modifies the firmware data during download to port from source to target model.
+     */
+    @OptIn(InternalAPI::class, InternalIoApi::class)
+    suspend fun downloadFileWithPorting(
+        fileName: String,
+        start: Long = 0,
+        size: Long,
+        output: Sink,
+        outputSize: Long,
+        sourceModel: String,
+        targetModel: String,
+        progressCallback: suspend (current: Long, max: Long, bps: Long) -> Unit,
+    ): String? {
+        val authV = getAuthV()
+        val url = getDownloadUrl(fileName)
+
+        val request = globalHttpClient.prepareRequest {
+            method = HttpMethod.Get
+            url(url)
+            headers {
+                append("Authorization", authV)
+                append("User-Agent", "Kies2.0_FUS")
+                if (start > 0) {
+                    append("Range", "bytes=${start}-")
+                }
+            }
+            timeout {
+                this.requestTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                this.socketTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+                this.connectTimeoutMillis = HttpTimeoutConfig.INFINITE_TIMEOUT_MS
+            }
+        }
+
+        return request.execute { response ->
+            val md5 = response.headers["Content-MD5"]
+            val channel = response.bodyAsChannel()
+            val outputChannel = output.asByteWriteChannel()
+
+            // Create firmware porter for real-time modification
+            val porter = StreamingFirmwarePorter(sourceModel, targetModel)
+
+            trackOperationProgress(
+                size = size,
+                progressCallback = progressCallback,
+                operation = {
+                    val chunkSize = 1024 * 256L
+                    channel.awaitContent(min = minOf(chunkSize, channel.readBuffer.remaining).toInt())
+                    
+                    // Read chunk
+                    val buffer = ByteArray(chunkSize.toInt())
+                    val bytesRead = channel.readAvailable(buffer, 0, buffer.size)
+                    
+                    if (bytesRead > 0) {
+                        // Port the chunk in real-time
+                        val portedChunk = porter.portChunk(buffer, bytesRead)
+                        
+                        // Write ported chunk to output
+                        outputChannel.writeFully(portedChunk, 0, portedChunk.size)
+                        outputChannel.flush()
+                        
+                        bytesRead.toLong()
+                    } else {
+                        0L
+                    }
+                },
+                progressOffset = outputSize,
+                condition = { !channel.isClosedForRead },
+                throttle = false,
+            )
+
+            md5
+        }
+    }
+
     private fun HttpResponse.is401(body: String): Boolean {
         if (status.value == 401) {
             return true

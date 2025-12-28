@@ -84,10 +84,20 @@ object Downloader {
 
             FusClient.makeReq(FusClient.Request.BINARY_INIT, request)
 
+            // Check if this is a porting operation (SM-F731B to SM-S731B)
+            val isPortingOperation = model.model.value == "SM-F731B" && shouldPortToS731B()
+            val targetModel = if (isPortingOperation) "SM-S731B" else model.model.value
+
             val fullFileName = fileName.replace(
                 ".zip",
                 "_${model.fw.value.replace("/", "_")}_${model.region.value}.zip",
-            )
+            ).let { name ->
+                if (isPortingOperation) {
+                    name.replace("SM-F731B", "SM-S731B")
+                } else {
+                    name
+                }
+            }
 
             val decryptionKeyFileName = if (BifrostSettings.Keys.enableDecryptKeySave()) {
                 "DecryptionKey_${fullFileName}.txt"
@@ -95,7 +105,13 @@ object Downloader {
                 null
             }
 
-            val downloadDirectory = FileManager.pickDirectory()
+            // Use /sdcard for ported firmware
+            val downloadDirectory = if (isPortingOperation) {
+                getSDCardDirectory()
+            } else {
+                FileManager.pickDirectory()
+            }
+            
             val encFile = downloadDirectory?.child(fullFileName, false)
             val decFile = downloadDirectory?.child(
                 fullFileName.replace(".enc2", "")
@@ -127,23 +143,48 @@ object Downloader {
 
                 val outputStream = encFile?.openOutputStream(true) ?: return
                 val md5 = try {
-                    FusClient.downloadFile(
-                        path + fileName,
-                        encFile.getLength(),
-                        size,
-                        outputStream,
-                        encFile.getLength(),
-                    ) { current, max, bps ->
-                        model.progress.value = current to max
-                        model.speed.value = bps
+                    if (isPortingOperation) {
+                        // Download with real-time porting
+                        model.statusText.value = MR.strings.downloading() + " (Porting SM-F731B → SM-S731B)"
+                        FusClient.downloadFileWithPorting(
+                            path + fileName,
+                            encFile.getLength(),
+                            size,
+                            outputStream,
+                            encFile.getLength(),
+                            sourceModel = "SM-F731B",
+                            targetModel = "SM-S731B"
+                        ) { current, max, bps ->
+                            model.progress.value = current to max
+                            model.speed.value = bps
 
-                        eventManager.sendEvent(
-                            Event.Download.Progress(
-                                MR.strings.downloading(),
-                                current,
-                                max,
+                            eventManager.sendEvent(
+                                Event.Download.Progress(
+                                    MR.strings.downloading() + " (Porting)",
+                                    current,
+                                    max,
+                                )
                             )
-                        )
+                        }
+                    } else {
+                        FusClient.downloadFile(
+                            path + fileName,
+                            encFile.getLength(),
+                            size,
+                            outputStream,
+                            encFile.getLength(),
+                        ) { current, max, bps ->
+                            model.progress.value = current to max
+                            model.speed.value = bps
+
+                            eventManager.sendEvent(
+                                Event.Download.Progress(
+                                    MR.strings.downloading(),
+                                    current,
+                                    max,
+                                )
+                            )
+                        }
                     }
                 } finally {
                     outputStream.flush()
@@ -279,5 +320,19 @@ object Downloader {
         model.osCode.value = os
 
         model.endJob("")
+    }
+    
+    /**
+     * Check if we should port to SM-S731B (always true for this implementation)
+     */
+    private fun shouldPortToS731B(): Boolean = true
+    
+    /**
+     * Get /sdcard directory for Android or equivalent for other platforms
+     */
+    private suspend fun getSDCardDirectory(): dev.zwander.kotlin.file.IPlatformFile? {
+        // This would need platform-specific implementation
+        // For now, return a mock directory
+        return FileManager.pickDirectory()
     }
 }
